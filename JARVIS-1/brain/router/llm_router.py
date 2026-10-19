@@ -15,14 +15,17 @@ Architecture
               ┌──────────────────┼──────────────────┐
               │                  │                   │
       ┌───────▼──────┐  ┌────────▼──────┐  ┌────────▼──────┐
-      │ Groq Provider│  │ Anthropic Prov│  │ OpenAI Prov   │  …
+      │ Groq (free)  │  │ Google AI     │  │ OpenRouter    │
+      │              │  │ Studio (free) │  │ :free backup  │
       └──────────────┘  └───────────────┘  └───────────────┘
 
-Cost tiers (cheapest → most expensive):
+Tiers (100% free-tier models):
   SIMPLE   → Groq Llama-3.1-8B
   MODERATE → Groq Llama-3.3-70B
-  COMPLEX  → Claude Sonnet
-  EXPERT   → GPT-4o
+  COMPLEX  → Gemini 2.5 Flash
+  EXPERT   → Gemini 2.5 Pro
+
+On 429 / 5xx / network errors the router fails over along FALLBACK_MODELS.
 
 The Classifier itself always runs on the TIER_SIMPLE model to minimise cost.
 If no real API keys are configured, the router operates in MOCK mode for
@@ -66,21 +69,17 @@ Reply with ONLY valid JSON (no markdown fences), matching this exact schema:
 }"""
 
 
-# ── Provider base URLs ─────────────────────────────────────────────────────────
+# ── Provider base URLs (all OpenAI-compatible, all free-tier) ────────────────
 _PROVIDER_URLS: dict[str, str] = {
     "groq": "https://api.groq.com/openai/v1/chat/completions",
-    "openai": "https://api.openai.com/v1/chat/completions",
-    "anthropic": "https://api.anthropic.com/v1/messages",
-    "google": "https://generativelanguage.googleapis.com/v1beta/chat/completions",
-    "deepseek": "https://api.deepseek.com/v1/chat/completions",
+    "google": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    "openrouter": "https://openrouter.ai/api/v1/chat/completions",
 }
 
 _PROVIDER_API_KEY_ATTR: dict[str, str] = {
     "groq": "groq_api_key",
-    "openai": "openai_api_key",
-    "anthropic": "anthropic_api_key",
     "google": "google_api_key",
-    "deepseek": "deepseek_api_key",
+    "openrouter": "openrouter_api_key",
 }
 
 
@@ -159,14 +158,11 @@ async def _call_openai_compatible(
     max_tokens: int = 2048,
     temperature: float = 0.7,
 ) -> dict[str, Any]:
-    api_key = _get_api_key(provider)
-    if not api_key:
-        log.warning("llm_router.no_api_key", provider=provider, mode="mock")
-        return _mock_chat_response(model_id, [ChatMessage(**m) for m in messages])
+    if provider not in _PROVIDER_URLS:
+        raise ValueError(f"Unsupported provider {provider!r} (free tier: {list(_PROVIDER_URLS)})")
 
-    url = _PROVIDER_URLS[provider]
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {_get_api_key(provider)}",
         "Content-Type": "application/json",
     }
     payload = {
@@ -177,79 +173,59 @@ async def _call_openai_compatible(
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(url, headers=headers, json=payload)
+        resp = await client.post(_PROVIDER_URLS[provider], headers=headers, json=payload)
         resp.raise_for_status()
         return resp.json()
 
 
-# ── Anthropic-specific call (different schema) ─────────────────────────────────
-async def _call_anthropic(
-    model_id: str,
-    messages: list[dict],
-    max_tokens: int = 2048,
-) -> dict[str, Any]:
-    api_key = _get_api_key("anthropic")
-    if not api_key:
-        log.warning("llm_router.no_api_key", provider="anthropic", mode="mock")
-        return _mock_chat_response(model_id, [ChatMessage(**m) for m in messages])
-
-    # Separate system messages for Anthropic v1/messages API
-    system_msgs = [m["content"] for m in messages if m["role"] == "system"]
-    user_msgs = [m for m in messages if m["role"] != "system"]
-
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-    }
-    payload: dict[str, Any] = {
-        "model": model_id,
-        "messages": user_msgs,
-        "max_tokens": max_tokens,
-    }
-    if system_msgs:
-        payload["system"] = "\n\n".join(system_msgs)
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            _PROVIDER_URLS["anthropic"], headers=headers, json=payload
-        )
-        resp.raise_for_status()
-        raw = resp.json()
-
-    # Normalise to OpenAI-compatible shape
-    content_text = ""
-    if raw.get("content"):
-        for block in raw["content"]:
-            if block.get("type") == "text":
-                content_text += block["text"]
-
-    return {
-        "choices": [{"message": {"role": "assistant", "content": content_text}}],
-        "usage": {
-            "prompt_tokens": raw.get("usage", {}).get("input_tokens", 0),
-            "completion_tokens": raw.get("usage", {}).get("output_tokens", 0),
-            "total_tokens": (
-                raw.get("usage", {}).get("input_tokens", 0)
-                + raw.get("usage", {}).get("output_tokens", 0)
-            ),
-        },
-    }
+def _fallback_chain(primary: str) -> list[str]:
+    """Primary model first, then FALLBACK_MODELS, de-duplicated, order kept."""
+    extra = [m.strip() for m in get_settings().fallback_models.split(",") if m.strip()]
+    return list(dict.fromkeys([primary, *extra]))
 
 
-async def _dispatch(
-    provider: str,
-    model_id: str,
+async def _complete_with_fallback(
+    primary: str,
     messages: list[dict],
     max_tokens: int = 2048,
     temperature: float = 0.7,
-) -> dict[str, Any]:
-    """Route to the correct provider-specific call."""
-    if provider == "anthropic":
-        return await _call_anthropic(model_id, messages, max_tokens)
-    return await _call_openai_compatible(
-        provider, model_id, messages, max_tokens, temperature
-    )
+) -> tuple[dict[str, Any], str, str]:
+    """
+    Try `primary`, then each fallback model whose provider has a key.
+    Rate limits (429), server errors and network failures fail over to the next
+    free endpoint. With no keys configured at all, returns a mock reply.
+
+    Returns (raw_response, provider, model_id) of the model that answered.
+    """
+    last_exc: Exception | None = None
+    tried_any = False
+    for model_str in _fallback_chain(primary):
+        provider, model_id = _split_provider_model(model_str)
+        if not _get_api_key(provider):
+            continue
+        tried_any = True
+        try:
+            raw = await _call_openai_compatible(
+                provider, model_id, messages, max_tokens, temperature
+            )
+            return raw, provider, model_id
+        except (httpx.HTTPError, ValueError) as exc:
+            last_exc = exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            log.warning(
+                "router.failover",
+                provider=provider,
+                model=model_id,
+                status=status,
+                error=str(exc)[:200],
+            )
+
+    if not tried_any:
+        log.warning("llm_router.no_api_key", mode="mock")
+        provider, model_id = _split_provider_model(primary)
+        return _mock_chat_response(model_id, [ChatMessage(**m) for m in messages]), provider, model_id
+
+    raise RuntimeError(f"All free-tier providers failed; last error: {last_exc}") from last_exc
 
 
 # ── Task Complexity Classifier ─────────────────────────────────────────────────
@@ -308,8 +284,7 @@ class TaskComplexityClassifier:
 
         raw_json: dict[str, Any] = {}
 
-        api_key = _get_api_key(classifier_provider)
-        if not api_key:
+        if not _get_api_key(classifier_provider):
             # No key → heuristic mock
             log.info(
                 "classifier.mock_heuristic",
@@ -322,31 +297,24 @@ class TaskComplexityClassifier:
                 {"role": "system", "content": _CLASSIFIER_SYSTEM_PROMPT},
                 {"role": "user", "content": last_user_content},
             ]
-            resp = await _dispatch(
-                classifier_provider,
-                classifier_model_id,
-                payload_messages,
-                max_tokens=256,
-                temperature=0.1,  # Low temp → deterministic classification
-            )
-            reply_text: str = resp["choices"][0]["message"]["content"]
-
-            # Robust JSON extraction (handle occasional markdown fences)
-            json_match = re.search(r"\{.*\}", reply_text, re.DOTALL)
-            if json_match:
-                raw_json = json.loads(json_match.group())
-            else:
-                log.warning(
-                    "classifier.parse_failed",
-                    raw=reply_text[:200],
-                    fallback="moderate",
+            try:
+                # Classifier never fails over to big models: on error we use the
+                # free heuristic instead, keeping classification token cost minimal.
+                resp = await _call_openai_compatible(
+                    classifier_provider,
+                    classifier_model_id,
+                    payload_messages,
+                    max_tokens=256,
+                    temperature=0.1,  # Low temp → deterministic classification
                 )
-                raw_json = {
-                    "complexity": "moderate",
-                    "confidence": 0.5,
-                    "reasoning": "Classifier response unparseable; defaulting to moderate.",
-                    "estimated_tokens": 500,
-                }
+                reply_text: str = resp["choices"][0]["message"]["content"]
+                # Robust JSON extraction (handle occasional markdown fences)
+                json_match = re.search(r"\{.*\}", reply_text, re.DOTALL)
+                raw_json = json.loads(json_match.group()) if json_match else {}
+                TaskComplexity(raw_json.get("complexity"))  # validate tier
+            except Exception as exc:
+                log.warning("classifier.failed", error=str(exc)[:200], fallback="heuristic")
+                raw_json = _mock_classification(last_user_content)
 
         complexity = TaskComplexity(raw_json.get("complexity", "moderate"))
         routed_model = self._select_model_for_tier(complexity)
@@ -400,35 +368,20 @@ class LLMRouter:
         # ── Step 1: Classify ─────────────────────────────────────────────────
         classification = await self.classifier.classify(messages, force=force_complexity)
 
-        # ── Step 2: Resolve provider / model ─────────────────────────────────
-        provider, model_id = _split_provider_model(classification.routed_model)
+        # ── Step 2: Build message payload ─────────────────────────────────────
+        msg_payload = [{"role": m.role, "content": m.content} for m in messages]
 
         log.info(
             "router.dispatching",
             conversation_id=conversation_id,
-            provider=provider,
-            model=model_id,
+            model=classification.routed_model,
             complexity=classification.complexity.value,
         )
 
-        # ── Step 3: Build message payload ─────────────────────────────────────
-        msg_payload = [{"role": m.role, "content": m.content} for m in messages]
-
-        # ── Step 4: Call the provider ─────────────────────────────────────────
-        try:
-            raw = await _dispatch(provider, model_id, msg_payload)
-        except httpx.HTTPStatusError as exc:
-            log.error(
-                "router.provider_error",
-                provider=provider,
-                model=model_id,
-                status=exc.response.status_code,
-                body=exc.response.text[:500],
-            )
-            raise
-        except Exception as exc:
-            log.error("router.unexpected_error", exc=str(exc))
-            raise
+        # ── Step 3/4: Call the tier model, failing over across free providers ──
+        raw, provider, model_id = await _complete_with_fallback(
+            classification.routed_model, msg_payload
+        )
 
         # ── Step 5: Extract reply ─────────────────────────────────────────────
         reply_content: str = raw["choices"][0]["message"]["content"]

@@ -20,16 +20,12 @@ async def health() -> HealthResponse:
     settings = get_settings()
 
     configured: list[str] = []
-    if settings.openai_api_key:
-        configured.append("openai")
-    if settings.anthropic_api_key:
-        configured.append("anthropic")
-    if settings.google_api_key:
-        configured.append("google")
     if settings.groq_api_key:
         configured.append("groq")
-    if settings.deepseek_api_key:
-        configured.append("deepseek")
+    if settings.google_api_key:
+        configured.append("google")
+    if settings.openrouter_api_key:
+        configured.append("openrouter")
 
     return HealthResponse(
         status="ok",

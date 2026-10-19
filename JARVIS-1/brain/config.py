@@ -34,11 +34,10 @@ class Settings(BaseSettings):
     secret_key: str = Field(default="jarvis-dev-secret-change-in-production")
 
     # ── API Keys ───────────────────────────────────────────────────────────────
-    openai_api_key: str = Field(default="")
-    anthropic_api_key: str = Field(default="")
-    google_api_key: str = Field(default="")
+    # Free-tier providers only: Groq, Google AI Studio, OpenRouter (":free" models).
     groq_api_key: str = Field(default="")
-    deepseek_api_key: str = Field(default="")
+    google_api_key: str = Field(default="")
+    openrouter_api_key: str = Field(default="")
 
     # ── Router / Classifier ────────────────────────────────────────────────────
     # The classifier must be cheap & fast — it runs on *every* request.
@@ -47,8 +46,18 @@ class Settings(BaseSettings):
     # Tier model assignments (provider/model-id)
     tier_simple_model: str = Field(default="groq/llama-3.1-8b-instant")
     tier_moderate_model: str = Field(default="groq/llama-3.3-70b-versatile")
-    tier_complex_model: str = Field(default="anthropic/claude-sonnet-4-5")
-    tier_expert_model: str = Field(default="openai/gpt-4o")
+    tier_complex_model: str = Field(default="google/gemini-2.5-flash")
+    tier_expert_model: str = Field(default="google/gemini-2.5-pro")
+
+    # Tried in order when the tier model is rate-limited, errors, or has no key.
+    fallback_models: str = Field(
+        default=(
+            "groq/llama-3.3-70b-versatile,"
+            "google/gemini-2.5-flash,"
+            "openrouter/meta-llama/llama-3.3-70b-instruct:free,"
+            "groq/llama-3.1-8b-instant"
+        )
+    )
 
 
 @lru_cache(maxsize=1)
