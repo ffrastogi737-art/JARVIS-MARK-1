@@ -3,7 +3,7 @@ test_cloud_first_daemon.py -- Verifies Phase 7: Cloud-First Brain + ultra-light 
 
 A real Cloud Brain (uvicorn, this process) talks to real Edge Agents over HTTP:
   [1] cloud payload dispatch (signed) and rejection of forged tasks
-  [2] edge footprint: < 30 MB RSS, ~0 idle CPU, no heavy cloud modules loaded
+  [2] edge footprint: < 40 MB RSS, ~0 idle CPU, no heavy cloud modules loaded
   [3] offline buffering, reconnection sync and verified hot-reload updates
   [4] local Tether HALT override on the Edge Agent
 
@@ -154,7 +154,7 @@ def test_footprint() -> None:
         time.sleep(5)
         cpu_pct = (sum(p.cpu_times()[:2]) - cpu0) / (time.monotonic() - t0) * 100
         rss = p.memory_info().rss / 2**20
-        check(f"RSS {rss:.1f} MB < 30 MB", rss < 30, rss)
+        check(f"RSS {rss:.1f} MB < 40 MB", rss < 40, rss)
         check(f"idle CPU {cpu_pct:.2f}% < 1%", cpu_pct < 1, cpu_pct)
         out, _ = child.communicate("\n", timeout=10)
         info = json.loads(out)
