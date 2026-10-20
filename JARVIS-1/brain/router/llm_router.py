@@ -15,14 +15,16 @@ Architecture
               ┌──────────────────┼──────────────────┐
               │                  │                   │
       ┌───────▼──────┐  ┌────────▼──────┐  ┌────────▼──────┐
-      │ Groq Provider│  │ Anthropic Prov│  │ OpenAI Prov   │  …
+      │ Groq Provider│  │ Gemini Prov   │  │ OpenRouter    │  …
       └──────────────┘  └───────────────┘  └───────────────┘
 
-Cost tiers (cheapest → most expensive):
+Tiers (all free-tier providers):
   SIMPLE   → Groq Llama-3.1-8B
   MODERATE → Groq Llama-3.3-70B
-  COMPLEX  → Claude Sonnet
-  EXPERT   → GPT-4o
+  COMPLEX  → Gemini 2.5 Flash
+  EXPERT   → OpenRouter DeepSeek-R1 (free)
+
+On 429 / 5xx / timeout the router fails over through settings.fallback_models.
 
 The Classifier itself always runs on the TIER_SIMPLE model to minimise cost.
 If no real API keys are configured, the router operates in MOCK mode for
@@ -67,20 +69,21 @@ Reply with ONLY valid JSON (no markdown fences), matching this exact schema:
 
 
 # ── Provider base URLs ─────────────────────────────────────────────────────────
+# Free-tier providers only, all OpenAI-compatible.
 _PROVIDER_URLS: dict[str, str] = {
     "groq": "https://api.groq.com/openai/v1/chat/completions",
-    "openai": "https://api.openai.com/v1/chat/completions",
-    "anthropic": "https://api.anthropic.com/v1/messages",
-    "google": "https://generativelanguage.googleapis.com/v1beta/chat/completions",
-    "deepseek": "https://api.deepseek.com/v1/chat/completions",
+    "google": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    "cerebras": "https://api.cerebras.ai/v1/chat/completions",
+    "sambanova": "https://api.sambanova.ai/v1/chat/completions",
+    "openrouter": "https://openrouter.ai/api/v1/chat/completions",
 }
 
-_PROVIDER_API_KEY_ATTR: dict[str, str] = {
+PROVIDER_API_KEY_ATTR: dict[str, str] = {
     "groq": "groq_api_key",
-    "openai": "openai_api_key",
-    "anthropic": "anthropic_api_key",
     "google": "google_api_key",
-    "deepseek": "deepseek_api_key",
+    "cerebras": "cerebras_api_key",
+    "sambanova": "sambanova_api_key",
+    "openrouter": "openrouter_api_key",
 }
 
 
@@ -96,7 +99,7 @@ def _split_provider_model(model_str: str) -> tuple[str, str]:
 
 def _get_api_key(provider: str) -> str:
     settings = get_settings()
-    attr = _PROVIDER_API_KEY_ATTR.get(provider, "")
+    attr = PROVIDER_API_KEY_ATTR.get(provider, "")
     return getattr(settings, attr, "") if attr else ""
 
 
@@ -182,61 +185,6 @@ async def _call_openai_compatible(
         return resp.json()
 
 
-# ── Anthropic-specific call (different schema) ─────────────────────────────────
-async def _call_anthropic(
-    model_id: str,
-    messages: list[dict],
-    max_tokens: int = 2048,
-) -> dict[str, Any]:
-    api_key = _get_api_key("anthropic")
-    if not api_key:
-        log.warning("llm_router.no_api_key", provider="anthropic", mode="mock")
-        return _mock_chat_response(model_id, [ChatMessage(**m) for m in messages])
-
-    # Separate system messages for Anthropic v1/messages API
-    system_msgs = [m["content"] for m in messages if m["role"] == "system"]
-    user_msgs = [m for m in messages if m["role"] != "system"]
-
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-    }
-    payload: dict[str, Any] = {
-        "model": model_id,
-        "messages": user_msgs,
-        "max_tokens": max_tokens,
-    }
-    if system_msgs:
-        payload["system"] = "\n\n".join(system_msgs)
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            _PROVIDER_URLS["anthropic"], headers=headers, json=payload
-        )
-        resp.raise_for_status()
-        raw = resp.json()
-
-    # Normalise to OpenAI-compatible shape
-    content_text = ""
-    if raw.get("content"):
-        for block in raw["content"]:
-            if block.get("type") == "text":
-                content_text += block["text"]
-
-    return {
-        "choices": [{"message": {"role": "assistant", "content": content_text}}],
-        "usage": {
-            "prompt_tokens": raw.get("usage", {}).get("input_tokens", 0),
-            "completion_tokens": raw.get("usage", {}).get("output_tokens", 0),
-            "total_tokens": (
-                raw.get("usage", {}).get("input_tokens", 0)
-                + raw.get("usage", {}).get("output_tokens", 0)
-            ),
-        },
-    }
-
-
 async def _dispatch(
     provider: str,
     model_id: str,
@@ -244,9 +192,7 @@ async def _dispatch(
     max_tokens: int = 2048,
     temperature: float = 0.7,
 ) -> dict[str, Any]:
-    """Route to the correct provider-specific call."""
-    if provider == "anthropic":
-        return await _call_anthropic(model_id, messages, max_tokens)
+    """All supported providers speak the OpenAI-compatible schema."""
     return await _call_openai_compatible(
         provider, model_id, messages, max_tokens, temperature
     )
@@ -400,35 +346,39 @@ class LLMRouter:
         # ── Step 1: Classify ─────────────────────────────────────────────────
         classification = await self.classifier.classify(messages, force=force_complexity)
 
-        # ── Step 2: Resolve provider / model ─────────────────────────────────
-        provider, model_id = _split_provider_model(classification.routed_model)
-
-        log.info(
-            "router.dispatching",
-            conversation_id=conversation_id,
-            provider=provider,
-            model=model_id,
-            complexity=classification.complexity.value,
-        )
-
-        # ── Step 3: Build message payload ─────────────────────────────────────
+        # ── Step 2: Build message payload ─────────────────────────────────────
         msg_payload = [{"role": m.role, "content": m.content} for m in messages]
 
-        # ── Step 4: Call the provider ─────────────────────────────────────────
-        try:
-            raw = await _dispatch(provider, model_id, msg_payload)
-        except httpx.HTTPStatusError as exc:
-            log.error(
-                "router.provider_error",
+        # ── Step 3: Call primary model, failing over on retryable errors ─────
+        candidates = [classification.routed_model] + [
+            m for m in get_settings().fallback_models
+            if m != classification.routed_model
+        ]
+        for i, model_str in enumerate(candidates):
+            provider, model_id = _split_provider_model(model_str)
+            log.info(
+                "router.dispatching",
+                conversation_id=conversation_id,
                 provider=provider,
                 model=model_id,
-                status=exc.response.status_code,
-                body=exc.response.text[:500],
+                complexity=classification.complexity.value,
+                attempt=i + 1,
             )
-            raise
-        except Exception as exc:
-            log.error("router.unexpected_error", exc=str(exc))
-            raise
+            try:
+                raw = await _dispatch(provider, model_id, msg_payload)
+                break
+            except (httpx.HTTPStatusError, httpx.TimeoutException) as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                retryable = status is None or status == 429 or status >= 500
+                log.warning(
+                    "router.provider_error",
+                    provider=provider,
+                    model=model_id,
+                    status=status,
+                    retryable=retryable,
+                )
+                if not retryable or i == len(candidates) - 1:
+                    raise
 
         # ── Step 5: Extract reply ─────────────────────────────────────────────
         reply_content: str = raw["choices"][0]["message"]["content"]

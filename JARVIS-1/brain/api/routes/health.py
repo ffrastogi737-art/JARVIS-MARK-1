@@ -8,6 +8,7 @@ from fastapi import APIRouter
 
 from brain.config import get_settings
 from brain.models.schemas import HealthResponse
+from brain.router.llm_router import PROVIDER_API_KEY_ATTR
 
 router = APIRouter()
 
@@ -19,17 +20,9 @@ async def health() -> HealthResponse:
     """Return service health status and which providers have API keys configured."""
     settings = get_settings()
 
-    configured: list[str] = []
-    if settings.openai_api_key:
-        configured.append("openai")
-    if settings.anthropic_api_key:
-        configured.append("anthropic")
-    if settings.google_api_key:
-        configured.append("google")
-    if settings.groq_api_key:
-        configured.append("groq")
-    if settings.deepseek_api_key:
-        configured.append("deepseek")
+    configured = [
+        name for name, attr in PROVIDER_API_KEY_ATTR.items() if getattr(settings, attr)
+    ]
 
     return HealthResponse(
         status="ok",

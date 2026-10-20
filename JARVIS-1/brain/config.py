@@ -34,11 +34,12 @@ class Settings(BaseSettings):
     secret_key: str = Field(default="jarvis-dev-secret-change-in-production")
 
     # ── API Keys ───────────────────────────────────────────────────────────────
-    openai_api_key: str = Field(default="")
-    anthropic_api_key: str = Field(default="")
-    google_api_key: str = Field(default="")
+    # Free-tier providers only — no paid key is ever required.
     groq_api_key: str = Field(default="")
-    deepseek_api_key: str = Field(default="")
+    google_api_key: str = Field(default="")  # Gemini (AI Studio free tier)
+    cerebras_api_key: str = Field(default="")
+    sambanova_api_key: str = Field(default="")
+    openrouter_api_key: str = Field(default="")
 
     # ── Router / Classifier ────────────────────────────────────────────────────
     # The classifier must be cheap & fast — it runs on *every* request.
@@ -47,8 +48,17 @@ class Settings(BaseSettings):
     # Tier model assignments (provider/model-id)
     tier_simple_model: str = Field(default="groq/llama-3.1-8b-instant")
     tier_moderate_model: str = Field(default="groq/llama-3.3-70b-versatile")
-    tier_complex_model: str = Field(default="anthropic/claude-sonnet-4-5")
-    tier_expert_model: str = Field(default="openai/gpt-4o")
+    tier_complex_model: str = Field(default="google/gemini-2.5-flash")
+    tier_expert_model: str = Field(default="openrouter/deepseek/deepseek-r1:free")
+
+    # Tried in order when the primary model hits a 429 / 5xx / timeout.
+    fallback_models: list[str] = Field(
+        default=[
+            "cerebras/llama-3.3-70b",
+            "sambanova/Meta-Llama-3.3-70B-Instruct",
+            "groq/llama-3.1-8b-instant",
+        ]
+    )
 
 
 @lru_cache(maxsize=1)
