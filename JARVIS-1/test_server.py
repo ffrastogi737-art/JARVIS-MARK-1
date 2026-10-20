@@ -19,6 +19,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="repla
 
 import asyncio
 import subprocess
+import tempfile
 import time
 
 import httpx
@@ -144,15 +145,14 @@ async def run_tests() -> None:
 
 
 async def main() -> None:
-    # Start the server in a subprocess
+    # Server output goes to a temp file, not a PIPE: nobody reads the pipe while tests run,
+    # and once its buffer fills (~4 KB on Windows) the server blocks on its next log write.
+    server_log = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
     proc = subprocess.Popen(
         [sys.executable, "main.py"],
         cwd=".",
-        stdout=subprocess.PIPE,
+        stdout=server_log,
         stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
     )
 
     print(f"Server PID: {proc.pid} -- waiting for /health ...")
@@ -161,8 +161,9 @@ async def main() -> None:
     if not ready:
         print("\n[FAIL] Server did not become ready in time. Captured output:")
         proc.terminate()
-        out, _ = proc.communicate(timeout=5)
-        print(out)
+        proc.wait(timeout=5)
+        server_log.seek(0)
+        print(server_log.read())
         sys.exit(1)
 
     print("[OK] Server is up!\n")
