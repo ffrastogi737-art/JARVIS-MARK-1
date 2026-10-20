@@ -72,6 +72,23 @@ async def main() -> None:
         pass
     print("[4] all providers down      [OK] PASSED")
 
+    # Classifier provider broken (timeout, 5xx, garbage reply) -> heuristic tier, no exception
+    classifier = llm_router.TaskComplexityClassifier()
+    original_key, original_dispatch = llm_router._get_api_key, llm_router._dispatch
+    llm_router._get_api_key = lambda provider: "fake-key"
+    try:
+        for outcome in (httpx.ReadTimeout("t"), _http_error(503), _OK, {"choices": []}):
+            async def fake_dispatch(*a, outcome=outcome, **kw):
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+            llm_router._dispatch = fake_dispatch
+            result = await classifier.classify([ChatMessage(role="user", content="hi")])
+            assert result.complexity == TaskComplexity.SIMPLE, (outcome, result)
+    finally:
+        llm_router._get_api_key, llm_router._dispatch = original_key, original_dispatch
+    print("[5] classifier fallback     [OK] PASSED")
+
     print("\nAll failover tests passed.")
 
 
