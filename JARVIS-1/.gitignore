@@ -3,3 +3,5 @@ __pycache__/
 brain/safety/backups/
 brain/skills/registry.json
 .env
+brain/research/candidates/
+brain/evolution/backups/
