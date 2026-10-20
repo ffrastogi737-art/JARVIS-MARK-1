@@ -76,7 +76,7 @@ def _wait(cond, timeout: float = 10.0) -> bool:
 
 PORT, DEAD_PORT = _free_port(), _free_port()
 CLOUD = f"http://127.0.0.1:{PORT}"
-cloud = httpx.Client(base_url=CLOUD + "/api/v1/edge", headers=AUTH)
+cloud = httpx.Client(base_url=CLOUD + "/api/v1/edge", headers=AUTH, timeout=5.0)
 
 
 def queue(**task) -> str:
@@ -97,7 +97,7 @@ def new_agent(url: str = CLOUD) -> EdgeAgent:
 
 def test_dispatch() -> None:
     print("\n[1] Cloud payload dispatch to Edge Agent")
-    check("cloud rejects edge calls without token", httpx.get(CLOUD + "/api/v1/edge/poll").status_code == 401)
+    check("cloud rejects edge calls without token", httpx.get(CLOUD + "/api/v1/edge/poll", timeout=5.0).status_code == 401)
     agent = new_agent()
     tid = queue(op="powershell", command="echo edge-ok")
     check("poll (heartbeat) receives the task", agent.poll_once() == 1)
