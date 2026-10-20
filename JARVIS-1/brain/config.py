@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     sambanova_api_key: str = Field(default="")
     openrouter_api_key: str = Field(default="")
 
+    # ── Tether (Phase 3) ───────────────────────────────────────────────────────
+    # Required by /api/v1/tether/*; when empty those endpoints refuse every request.
+    tether_secret_token: str = Field(default="")
+
     # ── Router / Classifier ────────────────────────────────────────────────────
     # The classifier must be cheap & fast — it runs on *every* request.
     classifier_model: str = Field(default="groq/llama-3.1-8b-instant")

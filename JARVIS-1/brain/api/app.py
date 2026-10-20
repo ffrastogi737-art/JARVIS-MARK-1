@@ -15,7 +15,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from brain.api.routes import chat, health, router_info
+from brain.api.routes import chat, health, router_info, tether
 from brain.config import get_settings
 from brain.logging_config import setup_logging
 
@@ -76,5 +76,6 @@ def create_app() -> FastAPI:
     app.include_router(health.router, tags=["Health"])
     app.include_router(chat.router, prefix="/api/v1", tags=["Chat"])
     app.include_router(router_info.router, prefix="/api/v1", tags=["Router"])
+    app.include_router(tether.router, prefix="/api/v1", tags=["Tether"])
 
     return app

@@ -1,2 +1,5 @@
 __pycache__/
 .venv/
+brain/safety/backups/
+brain/skills/registry.json
+.env

@@ -4,7 +4,8 @@ brain/agents/windows_agent.py — Windows Execution Agent (Phase 2).
 Gives the Brain hands on the host machine:
   • Shell     — PowerShell / CMD with stdout+stderr capture and timeouts
   • Processes — list, inspect, terminate (via psutil)
-  • Files     — read, write, list directory, metadata
+  • Files     — read, write, delete, list directory, metadata
+  • Tether    — executions are tracked by the kill-switch; overwrites/deletes are snapshotted
 
 Every operation returns a plain dict and is logged with structlog. Errors are
 captured into the result (``ok: False``) instead of raised, so the caller (an
@@ -30,6 +31,8 @@ from typing import Any
 import psutil
 import structlog
 
+from brain.safety.tether import SnapshotManager, kill_switch, kill_tree, snapshots
+
 log = structlog.get_logger(__name__)
 
 IS_WINDOWS = sys.platform == "win32"
@@ -39,8 +42,11 @@ DEFAULT_TIMEOUT = 30.0
 class WindowsAgent:
     """Executes shell, process and file operations on the local machine."""
 
-    def __init__(self, default_timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self, default_timeout: float = DEFAULT_TIMEOUT, snapshot_manager: SnapshotManager | None = None
+    ) -> None:
         self.default_timeout = default_timeout
+        self.snapshots = snapshot_manager or snapshots
         # Windows PowerShell 5.1 ships with Windows; pwsh is PowerShell 7+.
         self.powershell = shutil.which("powershell") or shutil.which("pwsh")
 
@@ -50,30 +56,43 @@ class WindowsAgent:
         t0 = time.monotonic()
         result: dict[str, Any] = {
             "ok": False, "returncode": None, "stdout": "", "stderr": "", "timed_out": False,
+            "halted": False,
         }
+        if kill_switch.halted:
+            result["stderr"] = f"Tether kill-switch engaged ({kill_switch.last_command}); execution blocked"
+            result.update(halted=True, duration_ms=0.0)
+            log.warning(f"windows_agent.{op}", command=argv[-1][:200], ok=False, halted=True)
+            return result
         try:
-            proc = subprocess.run(
-                argv, capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=timeout, cwd=cwd,
-            )
-            result.update(
-                ok=proc.returncode == 0, returncode=proc.returncode,
-                stdout=proc.stdout, stderr=proc.stderr,
-            )
-        except subprocess.TimeoutExpired as exc:
-            result.update(
-                timed_out=True,
-                stdout=_decode(exc.stdout),
-                stderr=f"Timed out after {timeout}s",
+            proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="replace", cwd=cwd,
             )
         except OSError as exc:
             result["stderr"] = str(exc)
+        else:
+            kill_switch.track(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # Kill the whole tree: orphaned grandchildren would hold the pipes open.
+                kill_tree(proc.pid)
+                stdout, _ = proc.communicate()
+                stderr = f"Timed out after {timeout}s"
+                result["timed_out"] = True
+            finally:
+                kill_switch.untrack(proc)
+            halted = kill_switch.halted
+            result.update(
+                ok=proc.returncode == 0 and not result["timed_out"] and not halted,
+                returncode=proc.returncode, stdout=stdout, stderr=stderr, halted=halted,
+            )
         result["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
 
         log.info(
             f"windows_agent.{op}",
             command=argv[-1][:200], ok=result["ok"], returncode=result["returncode"],
-            timed_out=result["timed_out"], duration_ms=result["duration_ms"],
+            timed_out=result["timed_out"], halted=result["halted"], duration_ms=result["duration_ms"],
         )
         return result
 
@@ -153,13 +172,24 @@ class WindowsAgent:
         return self._file_op("read_file", path, lambda p: {"content": p.read_text(encoding=encoding)})
 
     def write_file(self, path: str, content: str, encoding: str = "utf-8", append: bool = False) -> dict[str, Any]:
-        """Write (or append) text to a file, creating parent directories as needed."""
+        """Write (or append) text to a file. An existing file is snapshotted first (Tether)."""
         def op(p: Path) -> dict[str, Any]:
+            sid = self.snapshots.snapshot(p, reason="write_file") if p.exists() else None
             p.parent.mkdir(parents=True, exist_ok=True)
             with p.open("a" if append else "w", encoding=encoding) as f:
                 written = f.write(content)
-            return {"chars_written": written}
+            return {"chars_written": written, "snapshot_id": sid}
         return self._file_op("write_file", path, op)
+
+    def delete_path(self, path: str) -> dict[str, Any]:
+        """Delete a file or directory tree after snapshotting it (Tether)."""
+        def op(p: Path) -> dict[str, Any]:
+            if not p.exists():
+                raise FileNotFoundError(str(p))
+            sid = self.snapshots.snapshot(p, reason="delete_path")
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+            return {"snapshot_id": sid}
+        return self._file_op("delete_path", path, op)
 
     def list_directory(self, path: str) -> dict[str, Any]:
         """List the entries of a directory."""
@@ -193,12 +223,9 @@ class WindowsAgent:
         return result
 
 
-def _decode(data: bytes | str | None) -> str:
-    if isinstance(data, bytes):
-        return data.decode("utf-8", errors="replace")
-    return data or ""
-
-
 def _unavailable(op: str, reason: str) -> dict[str, Any]:
     log.warning(f"windows_agent.{op}", ok=False, reason=reason)
-    return {"ok": False, "returncode": None, "stdout": "", "stderr": reason, "timed_out": False, "duration_ms": 0.0}
+    return {
+        "ok": False, "returncode": None, "stdout": "", "stderr": reason,
+        "timed_out": False, "halted": False, "duration_ms": 0.0,
+    }
