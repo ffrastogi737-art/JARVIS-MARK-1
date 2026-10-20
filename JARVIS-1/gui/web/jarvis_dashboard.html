@@ -237,7 +237,7 @@ function appendText(text, model) {
   box.scrollTop = box.scrollHeight;
   if (model) $("model-badge").textContent = model;
 }
-function endTurn() { $("response").querySelector(".caret")?.remove(); hud.streaming = false; }
+function endTurn() { $("response").querySelector(".caret")?.remove(); hud.streaming = false; hud.targetLevel = 0; }
 
 // ── Bridge events ────────────────────────────────────────────────────────────
 function onMessage(raw) {
@@ -343,9 +343,6 @@ function resize(c) {
 function drawOrb(t) {
   resize(orb);
   const w = orb.width, h = orb.height, cx = w / 2, cy = h / 2;
-  // Attack fast, decay slow: the orb snaps to a syllable and breathes out.
-  hud.level += (hud.targetLevel - hud.level) * (hud.targetLevel > hud.level ? 0.45 : 0.08);
-  hud.targetLevel *= 0.92;
   const L = hud.level, base = Math.min(w, h) * 0.30, R = base * (1 + L * 0.38);
   hud.orbRadius = R / base;
   rotY += spin + L * 0.02;
@@ -390,7 +387,13 @@ function drawWave() {
     wctx.stroke();
   }
 }
-setInterval(() => {   // 20 Hz sampling of the live levels
+// Level smoothing runs on a timer, not in the frame loop: Chromium throttles or pauses
+// requestAnimationFrame (hidden window, software rendering), which froze the orb mid-pulse.
+setInterval(() => {   // 20 Hz: smooth the live level, then sample it
+  // Attack fast, decay slow: the orb snaps to a syllable and breathes out.
+  hud.level += (hud.targetLevel - hud.level) * (hud.targetLevel > hud.level ? 0.7 : 0.25);
+  hud.targetLevel *= 0.75;
+  if (hud.level < 0.001) hud.level = 0;
   hud.levels.push(hud.level); hud.micLevels.push(hud.mic); hud.mic *= 0.8;
   if (hud.levels.length > 120) { hud.levels.shift(); hud.micLevels.shift(); }
 }, 50);
