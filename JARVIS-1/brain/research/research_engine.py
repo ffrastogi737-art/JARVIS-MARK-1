@@ -3,7 +3,7 @@ brain/research/research_engine.py — Technical problem investigation (Phase 5, 
 
 Workflow:  error log / missing skill -> query Stack Overflow, docs pages, public GitHub
 READMEs (via AgentReach) -> extract code blocks -> keep only those that are valid
-Python (ast) or valid shell (``bash -n``, parse-only) -> rank -> write each candidate to
+Python (ast) or valid shell (shlex check, + ``bash -n`` on POSIX; parse-only) -> rank -> write each candidate to
 disk and register it in the Skill Registry in the ``Discovered`` state.
 
 Nothing found here is ever executed: candidates still have to pass the registry's
@@ -13,7 +13,9 @@ sandboxed promote() before they become Active.
 from __future__ import annotations
 
 import ast
+import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -31,7 +33,11 @@ log = structlog.get_logger(__name__)
 
 DEFAULT_DIR = Path(__file__).parent / "candidates"
 _PACKAGE_FOR = {imp: pkg for pkg, imp in DEFAULT_ALLOWLIST.items()}  # import name -> PyPI name
-_SHELL_START = re.compile(r"^(\$ |pip3? |python3? -m pip |apt(-get)? |sudo |npm |git |curl |export |cd |mkdir )")
+_CMDS = r"(pip3?|python3? -m pip|apt(-get)?|sudo|npm|git|curl|export|cd|mkdir) "
+_SHELL_START = re.compile(rf"^(\$\s|\$?{_CMDS})")
+_PROMPT = re.compile(rf"^\$(\s+|(?={_CMDS}))", re.MULTILINE)  # "$ cmd" / "$cmd", but never "$VAR"
+# Windows `bash` is often the WSL stub (fails with no distro installed), so only trust it on POSIX.
+_BASH = shutil.which("bash") if os.name != "nt" else None
 _ERROR_LINE = re.compile(r"^\s*([A-Za-z_][\w.]*(Error|Exception)\b.*)$", re.MULTILINE)
 _MISSING_MODULE = re.compile(r"No module named '([\w.]+)'")
 
@@ -52,11 +58,29 @@ def classify(code: str, lang_hint: str = "") -> tuple[str, str] | None:
                 return "python", code
         except SyntaxError:
             pass
-    shell = "\n".join(line[2:] if line.startswith("$ ") else line for line in code.splitlines())
-    if (lang_hint in ("sh", "bash", "shell", "console") or _SHELL_START.match(code)) and shutil.which("bash"):
-        if subprocess.run(["bash", "-n"], input=shell, capture_output=True, text=True, timeout=10).returncode == 0:
-            return "shell", shell
-    return None
+    if lang_hint not in ("sh", "bash", "shell", "console") and not _SHELL_START.match(code):
+        return None
+    shell = _PROMPT.sub("", code)
+    return ("shell", shell) if _valid_shell(shell) else None
+
+
+def _valid_shell(script: str) -> bool:
+    """Portable parse-only check: balanced quotes/parens, no dangling operator; plus `bash -n` on POSIX."""
+    try:
+        tokens = list(shlex.shlex(script, posix=True, punctuation_chars=True))
+    except ValueError:  # unbalanced quotes / trailing escape
+        return False
+    depth = 0
+    for t in tokens:
+        if set(t) <= set("();<>|&"):
+            depth += t.count("(") - t.count(")")
+            if depth < 0:
+                return False
+    if depth or not tokens or (set(tokens[-1]) <= set("();<>|&") and tokens[-1][-1] in "|&(<>"):
+        return False
+    if _BASH:
+        return subprocess.run([_BASH, "-n"], input=script, capture_output=True, text=True, timeout=10).returncode == 0
+    return True
 
 
 def dependencies(lang: str, code: str) -> list[str]:

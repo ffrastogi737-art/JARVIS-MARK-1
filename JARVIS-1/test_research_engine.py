@@ -21,6 +21,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 import httpx
 
 from brain.research.agent_reach import USER_AGENT, AgentReach, extract, markdown_code
+from brain.research import research_engine
 from brain.research.research_engine import ResearchEngine, build_query, classify, dependencies
 from brain.skills.registry import SkillRegistry
 
@@ -134,7 +135,19 @@ def test_validation() -> None:
           and classify("import yaml\nyaml.safe_load('a: 1')")[0] == "python")
     check("invalid Python rejected", classify("def broken(:\n    pass") is None)
     check("shell detected, `$ ` prompt stripped", classify("$ pip install pyyaml") == ("shell", "pip install pyyaml"))
-    check("bad shell rejected (bash -n)", classify("pip install x && (", "bash") is None)
+    check("`$cmd` prompt (no space) stripped", classify("$pip install pyyaml") == ("shell", "pip install pyyaml"))
+    check("multi-line prompts stripped", classify("$ cd app\n$ pip install -r req.txt")
+          == ("shell", "cd app\npip install -r req.txt"))
+    check("`$VAR` is not a prompt", classify("export X=1\necho $HOME", "bash") == ("shell", "export X=1\necho $HOME"))
+    check("bad shell rejected", classify("pip install x && (", "bash") is None)
+    bash, research_engine._BASH = research_engine._BASH, None  # behave as on Windows: no bash
+    try:
+        check("[no bash] shell detected, prompt stripped", classify("$ pip install pyyaml") == ("shell", "pip install pyyaml"))
+        check("[no bash] dangling operator rejected", classify("pip install x && (", "bash") is None)
+        check("[no bash] unbalanced quote rejected", classify("echo 'oops", "bash") is None)
+        check("[no bash] unbalanced paren rejected", classify("pip install x)", "bash") is None)
+    finally:
+        research_engine._BASH = bash
     check("prose in a code fence rejected", classify("not code at all {{{", "text") is None)
     check("deps: imports -> PyPI names, stdlib dropped",
           dependencies("python", "import os, json\nimport yaml\nfrom bs4 import BeautifulSoup") == ["beautifulsoup4", "pyyaml"])
