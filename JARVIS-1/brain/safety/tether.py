@@ -2,7 +2,8 @@
 brain/safety/tether.py — Tether & Safety Engine (Phase 3, Master Doc §20).
 
 Three safeguards replace manual human approval:
-  • Token auth   — protected endpoints require ``X-Tether-Token`` == TETHER_SECRET_TOKEN
+  • Token auth   — see brain/api/routes/tether.py (kept there so this module stays FastAPI-free
+                   for the lightweight edge daemon)
   • Kill-switch  — HALT / STOP / SHUTDOWN kills every tracked execution process tree
                    and blocks new executions until ``reset()``
   • Snapshots    — destructive file ops snapshot their target first; ``rollback(id)``
@@ -11,6 +12,7 @@ Three safeguards replace manual human approval:
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import shutil
@@ -23,25 +25,21 @@ from uuid import uuid4
 
 import psutil
 import structlog
-from fastapi import Header, HTTPException
-
-from brain.config import get_settings
 
 log = structlog.get_logger(__name__)
 
 BACKUP_ROOT = Path(__file__).parent / "backups"
 
 
-# ── Token authentication ───────────────────────────────────────────────────────
-def require_tether_token(x_tether_token: str | None = Header(default=None)) -> None:
-    """FastAPI dependency: reject requests without the correct X-Tether-Token."""
-    expected = get_settings().tether_secret_token
-    if not expected:
-        # Fail closed: an unset secret must never mean "open to everyone".
-        raise HTTPException(status_code=503, detail="TETHER_SECRET_TOKEN is not configured")
-    if not x_tether_token or not hmac.compare_digest(x_tether_token.encode(), expected.encode()):
-        log.warning("tether.auth_failed")
-        raise HTTPException(status_code=401, detail="Invalid or missing X-Tether-Token")
+# ── Task signing (Cloud Brain -> Edge Agent) ──────────────────────────────────
+def sign_task(task: dict[str, Any], secret: str) -> str:
+    """HMAC-SHA256 over the task (minus its ``sig``), so the edge runs only cloud-verified payloads."""
+    body = json.dumps({k: v for k, v in task.items() if k != "sig"}, sort_keys=True, separators=(",", ":"))
+    return hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+
+
+def verify_task(task: dict[str, Any], secret: str) -> bool:
+    return bool(secret) and isinstance(task.get("sig"), str) and hmac.compare_digest(task["sig"], sign_task(task, secret))
 
 
 # ── Kill-switch ────────────────────────────────────────────────────────────────

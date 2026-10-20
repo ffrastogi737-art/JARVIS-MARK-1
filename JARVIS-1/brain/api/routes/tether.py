@@ -5,12 +5,30 @@ brain/api/routes/tether.py — Token-protected Tether control endpoints.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+import structlog
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from brain.safety.tether import kill_switch, require_tether_token, snapshots
+from brain.config import get_settings
+from brain.safety.tether import kill_switch, snapshots
+
+log = structlog.get_logger(__name__)
+
+
+# ── Token authentication ───────────────────────────────────────────────────────
+def require_tether_token(x_tether_token: str | None = Header(default=None)) -> None:
+    """FastAPI dependency: reject requests without the correct X-Tether-Token."""
+    expected = get_settings().tether_secret_token
+    if not expected:
+        # Fail closed: an unset secret must never mean "open to everyone".
+        raise HTTPException(status_code=503, detail="TETHER_SECRET_TOKEN is not configured")
+    if not x_tether_token or not hmac.compare_digest(x_tether_token.encode(), expected.encode()):
+        log.warning("tether.auth_failed")
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Tether-Token")
+
 
 router = APIRouter(prefix="/tether", dependencies=[Depends(require_tether_token)])
 
