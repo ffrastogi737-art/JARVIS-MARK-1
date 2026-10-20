@@ -18,13 +18,24 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 import asyncio
+import os
+import socket
 import subprocess
 import tempfile
 import time
 
 import httpx
 
-BASE_URL = "http://127.0.0.1:8000"
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+# A fresh port, so a JARVIS already running on 8000 is neither clashed with nor tested by mistake.
+PORT = _free_port()
+BASE_URL = f"http://127.0.0.1:{PORT}"
 TIMEOUT = 30  # seconds to wait for server to become ready
 
 
@@ -153,6 +164,7 @@ async def main() -> None:
         cwd=".",
         stdout=server_log,
         stderr=subprocess.STDOUT,
+        env={**os.environ, "PORT": str(PORT)},  # env beats .env in pydantic-settings
     )
 
     print(f"Server PID: {proc.pid} -- waiting for /health ...")

@@ -43,6 +43,29 @@ async def _route_with(failures: dict[str, Exception]) -> tuple[str, list[str]]:
     return provider, calls
 
 
+def _chat(content: str) -> dict:
+    return {"choices": [{"message": {"content": content}}]}
+
+
+async def _classify_with(reply: object) -> tuple[object, dict]:
+    """Classify with a configured key, the provider returning `reply` (or raising it)."""
+    seen: dict = {}
+
+    async def fake_dispatch(provider, model_id, messages, *a, **kw):
+        seen.update(kw)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    original = llm_router._dispatch, llm_router._get_api_key
+    llm_router._dispatch, llm_router._get_api_key = fake_dispatch, lambda provider: "test-key"
+    try:
+        result = await LLMRouter().classifier.classify([ChatMessage(role="user", content="hi")])
+    finally:
+        llm_router._dispatch, llm_router._get_api_key = original
+    return result, seen
+
+
 async def main() -> None:
     # Primary (google) rate-limited -> first fallback (cerebras) answers
     provider, calls = await _route_with({"google": _http_error(429)})
@@ -71,6 +94,15 @@ async def main() -> None:
     except httpx.HTTPStatusError:
         pass
     print("[4] all providers down      [OK] PASSED")
+
+    # Classifier provider timeout / bad reply -> heuristic or `moderate`, never an error
+    for reply, expect in ((httpx.ReadTimeout("t"), None), (_http_error(503), None),
+                          ({"choices": []}, None), (_chat('{"complexity": "hard"}'), TaskComplexity.MODERATE),
+                          (_chat('{"complexity": "Simple"}'), TaskComplexity.SIMPLE)):
+        result, kw = await _classify_with(reply)
+        assert kw["timeout"] == 15.0, kw
+        assert expect is None or result.complexity == expect, (reply, result)
+    print("[5] classifier fallback     [OK] PASSED")
 
     print("\nAll failover tests passed.")
 

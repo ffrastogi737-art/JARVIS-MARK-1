@@ -161,6 +161,7 @@ async def _call_openai_compatible(
     messages: list[dict],
     max_tokens: int = 2048,
     temperature: float = 0.7,
+    timeout: float = 60.0,
 ) -> dict[str, Any]:
     api_key = _get_api_key(provider)
     if not api_key:
@@ -179,7 +180,7 @@ async def _call_openai_compatible(
         "temperature": temperature,
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         return resp.json()
@@ -191,10 +192,11 @@ async def _dispatch(
     messages: list[dict],
     max_tokens: int = 2048,
     temperature: float = 0.7,
+    timeout: float = 60.0,
 ) -> dict[str, Any]:
     """All supported providers speak the OpenAI-compatible schema."""
     return await _call_openai_compatible(
-        provider, model_id, messages, max_tokens, temperature
+        provider, model_id, messages, max_tokens, temperature, timeout
     )
 
 
@@ -268,33 +270,44 @@ class TaskComplexityClassifier:
                 {"role": "system", "content": _CLASSIFIER_SYSTEM_PROMPT},
                 {"role": "user", "content": last_user_content},
             ]
-            resp = await _dispatch(
-                classifier_provider,
-                classifier_model_id,
-                payload_messages,
-                max_tokens=256,
-                temperature=0.1,  # Low temp → deterministic classification
-            )
-            reply_text: str = resp["choices"][0]["message"]["content"]
-
-            # Robust JSON extraction (handle occasional markdown fences)
-            json_match = re.search(r"\{.*\}", reply_text, re.DOTALL)
-            if json_match:
-                raw_json = json.loads(json_match.group())
-            else:
-                log.warning(
-                    "classifier.parse_failed",
-                    raw=reply_text[:200],
-                    fallback="moderate",
+            try:
+                resp = await _dispatch(
+                    classifier_provider,
+                    classifier_model_id,
+                    payload_messages,
+                    max_tokens=256,
+                    temperature=0.1,  # Low temp → deterministic classification
+                    timeout=15.0,  # gatekeeper runs on every request: fail fast
                 )
-                raw_json = {
-                    "complexity": "moderate",
-                    "confidence": 0.5,
-                    "reasoning": "Classifier response unparseable; defaulting to moderate.",
-                    "estimated_tokens": 500,
-                }
+                reply_text: str = resp["choices"][0]["message"]["content"]
 
-        complexity = TaskComplexity(raw_json.get("complexity", "moderate"))
+                # Robust JSON extraction (handle occasional markdown fences)
+                json_match = re.search(r"\{.*\}", reply_text, re.DOTALL)
+                if json_match:
+                    raw_json = json.loads(json_match.group())
+                else:
+                    log.warning(
+                        "classifier.parse_failed",
+                        raw=reply_text[:200],
+                        fallback="moderate",
+                    )
+                    raw_json = {
+                        "complexity": "moderate",
+                        "confidence": 0.5,
+                        "reasoning": "Classifier response unparseable; defaulting to moderate.",
+                        "estimated_tokens": 500,
+                    }
+            except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
+                # A slow/down/garbled classifier must never fail the request: use the heuristic.
+                log.warning("classifier.provider_failed", provider=classifier_provider,
+                            error=f"{type(exc).__name__}: {exc}", fallback="heuristic")
+                raw_json = _mock_classification(last_user_content)
+
+        try:
+            complexity = TaskComplexity(str(raw_json.get("complexity", "moderate")).lower())
+        except ValueError:  # model invented a tier name
+            log.warning("classifier.unknown_tier", raw=raw_json.get("complexity"), fallback="moderate")
+            complexity = TaskComplexity.MODERATE
         routed_model = self._select_model_for_tier(complexity)
 
         result = ClassificationResult(
