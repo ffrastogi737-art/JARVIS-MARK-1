@@ -42,7 +42,10 @@ def main() -> None:
         if hasattr(signal, sig):
             signal.signal(getattr(signal, sig), lambda *_: stop.set())
 
-    agent = EdgeAgent(os.environ["JARVIS_CLOUD_URL"], os.environ.get("TETHER_SECRET_TOKEN", ""))
+    # JARVIS_AGENT=cloud on the always-on VM adds bash + headless browser ops.
+    from brain.agents import CloudComputerAgent, WindowsAgent
+    local = CloudComputerAgent() if os.environ.get("JARVIS_AGENT") == "cloud" else WindowsAgent()
+    agent = EdgeAgent(os.environ["JARVIS_CLOUD_URL"], os.environ.get("TETHER_SECRET_TOKEN", ""), agent=local)
     while not stop.is_set():
         try:
             agent.run(stop)

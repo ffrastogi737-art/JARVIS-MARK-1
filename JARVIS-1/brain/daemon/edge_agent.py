@@ -151,6 +151,9 @@ class EdgeAgent:
                 res = self.agent.run_powershell(task["command"], timeout=task.get("timeout"))
             elif op == "cmd":
                 res = self.agent.run_cmd(task["command"], timeout=task.get("timeout"))
+            elif op in ("bash", "browse") and hasattr(self.agent, "run_bash"):  # cloud-VM agent only
+                res = (self.agent.run_bash(task["command"], timeout=task.get("timeout")) if op == "bash"
+                       else self.agent.browse(task["url"], timeout=task.get("timeout")))
             elif op == "update":
                 res = self.sync.apply_update(task)
             else:
