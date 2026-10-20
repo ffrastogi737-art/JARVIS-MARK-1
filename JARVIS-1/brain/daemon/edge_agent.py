@@ -27,6 +27,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import psutil
 import structlog
 
 from brain.agents.windows_agent import WindowsAgent
@@ -85,7 +86,8 @@ class EdgeAgent:
             kill_switch.trigger("HALT")
         status = "halted" if kill_switch.halted else "busy" if self.busy else "idle"
         try:
-            tasks = self._request("GET", f"/api/v1/edge/poll?status={status}")["tasks"]
+            vitals = f"cpu={psutil.cpu_percent(interval=None)}&ram={psutil.virtual_memory().percent}"
+            tasks = self._request("GET", f"/api/v1/edge/poll?status={status}&{vitals}")["tasks"]
         except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
             if self.online:
                 log.warning("edge.offline", error=str(exc))

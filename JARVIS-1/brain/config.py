@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     # Required by /api/v1/tether/*; when empty those endpoints refuse every request.
     tether_secret_token: str = Field(default="")
 
+    # ── Gemini Live voice (Phase 8) ────────────────────────────────────────────
+    # Uses google_api_key. Model names churn; override with GEMINI_LIVE_MODEL.
+    gemini_live_model: str = Field(default="gemini-2.5-flash-native-audio-preview-12-2025")
+    gemini_live_url: str = Field(
+        default="wss://generativelanguage.googleapis.com/ws/"
+        "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+    )
+
     # ── Router / Classifier ────────────────────────────────────────────────────
     # The classifier must be cheap & fast — it runs on *every* request.
     classifier_model: str = Field(default="groq/llama-3.1-8b-instant")
