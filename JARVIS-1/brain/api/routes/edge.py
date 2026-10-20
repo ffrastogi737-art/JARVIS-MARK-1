@@ -6,7 +6,8 @@ hands the local Edge Agent only small, signed system tasks:
   POST /edge/tasks    queue a task; the cloud stamps an id and an HMAC signature
   GET  /edge/poll     the edge fetches pending tasks (tether tasks first); doubles as heartbeat
   POST /edge/results  the edge reports results (live, or a buffered batch after reconnecting)
-  GET  /edge/status   last heartbeat, queue depth, results
+  GET  /edge/status   last heartbeat (with laptop CPU/RAM %), queue depth, results
+  POST /agent/tether/halt  HUD panic button: HALT the cloud's processes and the edge's
 
 Tasks queue here while the laptop is offline and are delivered on its next poll.
 
@@ -16,6 +17,7 @@ runs more than one worker or must survive restarts.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Literal
 from uuid import uuid4
@@ -25,13 +27,13 @@ from pydantic import BaseModel
 
 from brain.api.routes.tether import require_tether_token
 from brain.config import get_settings
-from brain.safety.tether import sign_task
+from brain.safety.tether import kill_switch, sign_task
 
 router = APIRouter(prefix="/edge", dependencies=[Depends(require_tether_token)])
 
 _queue: list[dict[str, Any]] = []
 _results: dict[str, dict[str, Any]] = {}
-_last_seen: dict[str, Any] = {"at": None, "status": None}
+_last_seen: dict[str, Any] = {"at": None, "status": None, "cpu": None, "ram": None}
 
 
 class EdgeTask(BaseModel):
@@ -55,8 +57,8 @@ async def queue_task(body: EdgeTask) -> dict:
 
 
 @router.get("/poll", summary="Edge Agent heartbeat: fetch pending tasks")
-async def poll(status: str = "idle") -> dict:
-    _last_seen.update(at=time.time(), status=status)
+async def poll(status: str = "idle", cpu: float | None = None, ram: float | None = None) -> dict:
+    _last_seen.update(at=time.time(), status=status, cpu=cpu, ram=ram)
     tasks = sorted(_queue, key=lambda t: t["op"] != "tether")  # stable: HALT jumps the queue
     _queue.clear()
     return {"tasks": tasks}
@@ -72,3 +74,13 @@ async def results(body: EdgeResults) -> dict:
 @router.get("/status", summary="Edge heartbeat, queue depth and results")
 async def status() -> dict:
     return {"last_seen": _last_seen, "queued": len(_queue), "results": _results}
+
+
+halt_router = APIRouter(prefix="/agent/tether", dependencies=[Depends(require_tether_token)])
+
+
+@halt_router.post("/halt", summary="Panic button: HALT cloud executions and queue HALT for the edge")
+async def halt() -> dict:
+    res = await asyncio.to_thread(kill_switch.trigger, "HALT")
+    edge = await queue_task(EdgeTask(op="tether", command="HALT"))
+    return {**res, "edge_task": edge["id"]}
