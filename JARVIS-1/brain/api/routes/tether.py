@@ -9,7 +9,7 @@ import hmac
 import re
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket
 from pydantic import BaseModel
 
 from brain.config import get_settings
@@ -28,6 +28,18 @@ def require_tether_token(x_tether_token: str | None = Header(default=None)) -> N
     if not x_tether_token or not hmac.compare_digest(x_tether_token.encode(), expected.encode()):
         log.warning("tether.auth_failed")
         raise HTTPException(status_code=401, detail="Invalid or missing X-Tether-Token")
+
+
+async def accept_tethered_ws(ws: WebSocket, token: str = "") -> bool:
+    """WebSocket auth (X-Tether-Token header or ?token=): refuse the upgrade (HTTP 403) or accept."""
+    expected = get_settings().tether_secret_token
+    supplied = ws.headers.get("x-tether-token") or token
+    if not expected or not hmac.compare_digest(supplied.encode(), expected.encode()):
+        log.warning("tether.ws_auth_failed", path=ws.url.path)
+        await ws.close(code=1008, reason="Invalid or missing tether token")
+        return False
+    await ws.accept()
+    return True
 
 
 router = APIRouter(prefix="/tether", dependencies=[Depends(require_tether_token)])

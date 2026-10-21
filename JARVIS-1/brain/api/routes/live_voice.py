@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hmac
 import io
 import json
 import wave
@@ -35,6 +34,7 @@ import structlog
 import websockets
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from brain.api.routes.tether import accept_tethered_ws
 from brain.config import get_settings
 from brain.models.schemas import ChatMessage
 from brain.router.llm_router import LLMRouter
@@ -43,6 +43,10 @@ log = structlog.get_logger(__name__)
 router = APIRouter()
 
 LIVE_BADGE = "Gemini Live Native Audio"
+LANGUAGE_INSTRUCTION = (
+    "You are JARVIS. Reply in the language the user speaks: Hindi, English, or Hinglish "
+    "(Hindi and English mixed, Latin script) — mirror their mix and script."
+)
 GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 _llm_router = LLMRouter()
 
@@ -53,14 +57,9 @@ class LiveUnavailable(Exception):
 
 @router.websocket("/live/voice")
 async def live_voice(ws: WebSocket, token: str = "") -> None:
-    settings = get_settings()
-    supplied = ws.headers.get("x-tether-token") or token
-    expected = settings.tether_secret_token
-    if not expected or not hmac.compare_digest(supplied.encode(), expected.encode()):
-        log.warning("live_voice.auth_failed")
-        await ws.close(code=1008, reason="Invalid or missing tether token")
+    if not await accept_tethered_ws(ws, token):
         return
-    await ws.accept()
+    settings = get_settings()
     # One reader for the whole session: cancelling a pending ws.receive() (when Gemini drops
     # mid-turn) would wedge the socket, so both modes consume this queue instead.
     inbox: asyncio.Queue[dict] = asyncio.Queue()
@@ -99,6 +98,7 @@ async def _live_session(ws: WebSocket, inbox: asyncio.Queue) -> None:
         await gem.send(json.dumps({"setup": {
             "model": f"models/{s.gemini_live_model}",
             "generationConfig": {"responseModalities": ["AUDIO"]},
+            "systemInstruction": {"parts": [{"text": LANGUAGE_INSTRUCTION}]},
             "outputAudioTranscription": {},
         }}))
         reply = json.loads(await asyncio.wait_for(gem.recv(), timeout=10))
@@ -153,7 +153,7 @@ async def _gemini_to_client(gem, ws: WebSocket) -> None:
 # ── Fallback mode: text models via the LLMRouter ───────────────────────────────
 async def _fallback_session(ws: WebSocket, inbox: asyncio.Queue) -> None:
     await ws.send_json({"type": "ready", "mode": "fallback", "model": "LLM Router (text)"})
-    history: list[ChatMessage] = []
+    history: list[ChatMessage] = [ChatMessage(role="system", content=LANGUAGE_INSTRUCTION)]
     audio = bytearray()
     while True:
         msg = await inbox.get()

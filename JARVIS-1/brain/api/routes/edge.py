@@ -7,7 +7,6 @@ hands the local Edge Agent only small, signed system tasks:
   GET  /edge/poll     the edge fetches pending tasks (tether tasks first); doubles as heartbeat
   POST /edge/results  the edge reports results (live, or a buffered batch after reconnecting)
   GET  /edge/status   last heartbeat (with laptop CPU/RAM %), queue depth, results
-  POST /agent/tether/halt  HUD panic button: HALT the cloud's processes and the edge's
 
 Tasks queue here while the laptop is offline and are delivered on its next poll.
 
@@ -17,7 +16,6 @@ runs more than one worker or must survive restarts.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any, Literal
 from uuid import uuid4
@@ -27,7 +25,7 @@ from pydantic import BaseModel
 
 from brain.api.routes.tether import require_tether_token
 from brain.config import get_settings
-from brain.safety.tether import kill_switch, sign_task
+from brain.safety.tether import sign_task
 
 router = APIRouter(prefix="/edge", dependencies=[Depends(require_tether_token)])
 
@@ -75,12 +73,3 @@ async def results(body: EdgeResults) -> dict:
 async def status() -> dict:
     return {"last_seen": _last_seen, "queued": len(_queue), "results": _results}
 
-
-halt_router = APIRouter(prefix="/agent/tether", dependencies=[Depends(require_tether_token)])
-
-
-@halt_router.post("/halt", summary="Panic button: HALT cloud executions and queue HALT for the edge")
-async def halt() -> dict:
-    res = await asyncio.to_thread(kill_switch.trigger, "HALT")
-    edge = await queue_task(EdgeTask(op="tether", command="HALT"))
-    return {**res, "edge_task": edge["id"]}

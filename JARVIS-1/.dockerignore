@@ -1,0 +1,12 @@
+# Only main.py, brain/ and requirements.txt belong in the cloud image.
+.env
+**/__pycache__
+gui/
+cui/
+cli.py
+test_*.py
+install_daemon.ps1
+brain/safety/backups/
+brain/evolution/backups/
+brain/research/candidates/
+brain/skills/registry.json
