@@ -120,10 +120,10 @@ def test_dispatch() -> None:
 
 CHILD = r"""
 import json, sys, threading, time
+from brain.daemon.edge_agent import EdgeAgent  # first, as in service_wrapper (brain.daemon loads before structlog)
+from brain.daemon.cloud_sync import CloudSync
 import structlog
 structlog.configure(logger_factory=structlog.PrintLoggerFactory(sys.stderr))  # keep stdout for the protocol
-from brain.daemon.edge_agent import EdgeAgent
-from brain.daemon.cloud_sync import CloudSync
 stop = threading.Event()
 agent = EdgeAgent(sys.argv[1], sys.argv[2], sync=CloudSync(sys.argv[3]), poll_interval=0.1, max_interval=1.0,
                   halt_file=sys.argv[3] + ".halt")

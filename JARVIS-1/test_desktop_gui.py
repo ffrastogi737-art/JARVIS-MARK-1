@@ -281,7 +281,10 @@ def test_orb_pulse(app, window) -> None:
         app, window, "document.getElementById('response').textContent"), 10))
     check("model badge shows Gemini Live Native Audio",
           js(app, window, "document.getElementById('model-badge').textContent") == "Gemini Live Native Audio")
-    check("orb decays back after speech", spin(app, lambda: js(app, window, "hud.level") < 0.05, 10))
+    window.hide()  # hidden/occluded windows get no animation frames: decay must not depend on them
+    check("orb decays back after speech (even with frames paused)",
+          spin(app, lambda: js(app, window, "hud.level") < 0.05, 10))
+    window.show()
 
 
 # ── [5] TETHER HALT ────────────────────────────────────────────────────────────

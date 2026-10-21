@@ -1,0 +1,36 @@
+# Render Blueprint — JARVIS Cloud Brain, always on (Phase 9).
+# Deploy: Render dashboard -> New -> Blueprint -> pick this repo. The same Dockerfile runs
+# unchanged on Railway or AWS (ECS/App Runner): they also inject PORT.
+services:
+  - type: web
+    name: jarvis-brain
+    runtime: docker
+    rootDir: JARVIS-1
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Free instances sleep after 15 idle minutes; a paid plan stays up 24/7, so the edge
+    # task queue, tether and voice relay keep running while the laptop is off.
+    plan: starter
+    region: singapore
+    # Edge queue, results and notifications are in process memory: keep ONE instance.
+    numInstances: 1
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      # Render generates it once; copy it from the dashboard to the laptop and phone.
+      - key: TETHER_SECRET_TOKEN
+        generateValue: true
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: CEREBRAS_API_KEY
+        sync: false
+      - key: SAMBANOVA_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
