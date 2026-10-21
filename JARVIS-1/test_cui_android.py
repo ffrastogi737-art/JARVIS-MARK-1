@@ -4,7 +4,8 @@ test_cui_android.py -- Verifies Phase 9: 24/7 cloud deployment, terminal CUI, An
 No PySide6 / Chromium involved. A real Cloud Brain (uvicorn) runs against a local fake of the
 Gemini Live API:
   [1] cloud deployment config (render.yaml + Dockerfile) and a production-mode boot on $PORT
-  [2] CUI rendering integrity: no Qt/Chromium, Hindi/Hinglish text, keys, real terminal launch
+  [2] CUI rendering integrity: no Qt/Chromium, Hindi/Hinglish text, keys, real terminal launch,
+      flicker-free 2 Hz in-place repaint; --simple log stream mode
   [3] CUI <-> Cloud Brain: live chat, fallback, vitals, Ctrl+T HALT, voice toggle
   [4] Android API: auth, status, remote command -> laptop, chat, halt/reset, notifications,
       control WebSocket, phone audio relay
@@ -230,6 +231,22 @@ def test_cui_render() -> None:
         if select.select([fd], [], [], 0.2)[0]:
             screen += os.read(fd, 65536)
     check("`python cli.py` draws the HUD in a real terminal", b"Ctrl+T HALT" in screen)
+    check("HUD uses the alternate screen buffer", b"\x1b[?1049h" in screen)
+    idle = b""
+    t_end = time.monotonic() + 4.0
+    while time.monotonic() < t_end:  # idle: only the 2 Hz clock may repaint
+        if select.select([fd], [], [], 0.1)[0]:
+            idle += os.read(fd, 65536)
+    frames = idle.count(b"Ctrl+T HALT")
+    check(f"idle repaint locked to ~2 Hz ({frames} frames in 4 s)", 4 <= frames <= 10, frames)
+    check("frames overwrite in place: no full-screen clears", b"\x1b[2J" not in screen + idle)
+    os.write(fd, b"abc")
+    typed = b""
+    t_end = time.monotonic() + 0.4
+    while b"abc" not in typed and time.monotonic() < t_end:
+        if select.select([fd], [], [], 0.02)[0]:
+            typed += os.read(fd, 65536)
+    check("keystrokes repaint at once (no 2 Hz input lag)", b"abc" in typed)
     os.write(fd, b"\x11")  # Ctrl+Q
     deadline = time.monotonic() + 10
     status = None
@@ -243,6 +260,40 @@ def test_cui_render() -> None:
                 pass
     os.close(fd)
     check("Ctrl+Q exits cleanly", status is not None and os.waitstatus_to_exitcode(status) == 0, status)
+
+
+def test_cui_simple() -> None:
+    print("\n[2b] CUI --simple log stream mode")
+    GEMINI["mode"] = "ok"
+    proc = subprocess.Popen([sys.executable, "cli.py", "--simple", "--url", CLOUD, "--token", TOKEN], cwd=ROOT,
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env={**os.environ, "PYTHONIOENCODING": "utf-8", "COLUMNS": "120"})
+    out: list[str] = []
+    threading.Thread(target=lambda: out.extend(iter(proc.stdout.readline, b"")), daemon=True).start()
+    seen = lambda needle: any(needle in line.decode("utf-8", "replace") for line in out)  # noqa: E731
+    try:
+        check("stream mode connects and logs the live link", wait(lambda: seen("Link up · live"), 15), out)
+        proc.stdin.write("Namaste JARVIS, kya haal hai?\n".encode())
+        proc.stdin.flush()
+        check("typed Hinglish line answered as one log line",
+              wait(lambda: seen("JARVIS › Ji sir, samajh gaya: Namaste JARVIS, kya haal hai?"), 10), out)
+        api.get("/edge/poll?status=idle&cpu=21&ram=37")
+        check("edge daemon state streamed", wait(lambda: seen("Edge: idle · laptop cpu 21% · ram 37%"), 10), out)
+        sleeper_proc = sleeper()
+        proc.stdin.write(b"/halt\n")
+        proc.stdin.flush()
+        check("/halt engages the tether from stream mode",
+              wait(lambda: seen("TETHER HALT engaged") and sleeper_proc.poll() is not None, 10), out)
+        kill_switch.untrack(sleeper_proc)
+        kill_switch.reset()
+        proc.stdin.write(b"/quit\n")
+        proc.stdin.flush()
+        check("/quit exits cleanly", proc.wait(timeout=10) == 0, proc.stderr.read().decode()[-500:])
+        raw = b"".join(out)
+        check("plain stream: no cursor moves, clears or alternate screen",
+              not any(seq in raw for seq in (b"\x1b[?1049h", b"\x1b[2J", b"\x1b[H", b"\x1b[A")), raw[:300])
+    finally:
+        proc.kill()
 
 
 # ── [3] CUI <-> Cloud Brain ────────────────────────────────────────────────────
@@ -403,6 +454,7 @@ if __name__ == "__main__":
     try:
         test_deployment()
         test_cui_render()
+        test_cui_simple()
         test_cui_live()
         test_android()
     finally:

@@ -2,6 +2,7 @@
 cui/app.py — J.A.R.V.I.S. terminal Control Center (Phase 9).
 
     python cli.py            (env: JARVIS_CLOUD_URL, TETHER_SECRET_TOKEN)
+    python cli.py --simple   plain scrolling log, line input (low-end PCs, old consoles)
 
 A full-screen Rich HUD for the laptop, no Qt/Chromium: Cloud Brain link, Edge Agent
 heartbeat, local CPU/RAM, and a streaming chat with JARVIS over /api/v1/live/voice
@@ -11,7 +12,7 @@ Keys
   Ctrl+T   TETHER HALT (cloud + laptop). Not Ctrl+H: terminals send Ctrl+H for Backspace.
   Ctrl+R   voice on/off (mic -> Gemini Live; reply audio played back); off = end of turn
   Enter    send the typed line          Ctrl+Q / Ctrl+C   quit
-  /halt  /reset-hint  typed commands also work
+  /halt  /voice  /quit  typed commands also work (the only controls in --simple)
 
 Networking reuses gui/client.py (stdlib HTTP + websockets).
 """
@@ -21,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import threading
 import time
 from collections import deque
 from typing import Any
@@ -57,6 +59,9 @@ class CUI:
         self.level = 0.0
         self.halt_result: dict[str, Any] | None = None
         self.stop = asyncio.Event()
+        self.stream = False          # --simple: print events as lines instead of drawing the HUD
+        self._edge_said, self._edge_said_at = "", 0.0
+        self._live: Live | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._mic = self._speaker = None
         self._playback = bytearray()
@@ -78,6 +83,8 @@ class CUI:
                 self.model = msg["model"]
         elif kind == "turn_complete":
             self.streaming = False
+            if self.stream and self.chat and self.chat[-1][0] == "JARVIS":
+                self.console.print(Text.assemble(("JARVIS › ", f"bold {ACCENT}"), self.chat[-1][1]))
         elif kind == "error":
             if "Cloud link down" in msg.get("error", ""):
                 self.link = "down"
@@ -90,6 +97,8 @@ class CUI:
 
     def _log(self, text: str, style: str = "") -> None:
         self.log.append((time.strftime("%H:%M:%S"), text, style))
+        if self.stream:
+            self.console.print(Text.assemble((self.log[-1][0] + " ", DIM), (text, style)))
 
     # ── Keys ──────────────────────────────────────────────────────────────────
     def handle_key(self, key: str) -> None:
@@ -119,6 +128,12 @@ class CUI:
             return
         if text == "/halt":
             self._spawn(self.halt())
+            return
+        if text == "/voice":
+            self.toggle_voice()
+            return
+        if text == "/quit":
+            self.stop.set()
             return
         self.chat.append(["YOU", text])
         self.streaming = False
@@ -262,6 +277,8 @@ class CUI:
                 self.edge = (await self.client.edge_status())["last_seen"]
             except Exception as exc:
                 self.edge = {"error": str(exc)}
+            if self.stream:
+                self._say_edge()
             try:
                 await asyncio.wait_for(self.stop.wait(), STATUS_INTERVAL)
             except asyncio.TimeoutError:
@@ -269,14 +286,66 @@ class CUI:
 
     async def run(self) -> None:
         net = asyncio.create_task(self.connect())
-        with _raw_terminal(self.feed), Live(self.render(), console=self.console, screen=True,
-                                            refresh_per_second=10, transient=True) as live:
-            while not self.stop.is_set():
-                live.update(self.render())
-                try:
-                    await asyncio.wait_for(self.stop.wait(), 0.1)
-                except asyncio.TimeoutError:
-                    pass
+        # One repaint path at 2 Hz, drawn in place on the alternate screen (cursor home +
+        # overwrite, never a clear); a keypress repaints at once so typing never lags.
+        with Live(get_renderable=self.render, console=self.console, screen=True,
+                  refresh_per_second=2, transient=True) as self._live:
+            with _raw_terminal(self._on_keys):
+                await self.stop.wait()
+        self._live = None
+        await self._shutdown(net)
+
+    def _on_keys(self, chunk: str) -> None:
+        self.feed(chunk)
+        if self._live is not None:
+            self._live.refresh()
+
+    async def run_simple(self) -> None:
+        """--simple: no HUD, no cursor tricks — a scrolling log and line input."""
+        self.stream = True
+        url = self.cloud_url
+        self.console.print(Text.assemble(("J.A.R.V.I.S.", f"bold {ACCENT}"), f" stream mode · {url}"))
+        self.console.print(Text("Type and press Enter to chat · /halt · /voice · /quit (or Ctrl+C)", style=DIM))
+        net = asyncio.create_task(self.connect())
+        lines: asyncio.Queue[str | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def read_stdin() -> None:  # daemon thread: a blocked readline must not hold up exit
+            for line in sys.stdin:
+                loop.call_soon_threadsafe(lines.put_nowait, line.rstrip("\r\n"))
+            loop.call_soon_threadsafe(lines.put_nowait, None)  # EOF
+
+        threading.Thread(target=read_stdin, name="cui-stdin", daemon=True).start()
+        stopper = asyncio.create_task(self.stop.wait())
+        while not self.stop.is_set():
+            getter = asyncio.create_task(lines.get())
+            await asyncio.wait({getter, stopper}, return_when=asyncio.FIRST_COMPLETED)
+            if not getter.done():
+                getter.cancel()
+                break
+            line = getter.result()
+            if line is None:
+                self.stop.set()
+                break
+            self.buffer = line
+            self._submit()
+        await self._shutdown(net)
+
+    def _say_edge(self) -> None:
+        """Stream mode: one line when the laptop's daemon changes state, else every ~30 s."""
+        e = self.edge
+        if e.get("error"):
+            line = "Edge: cloud unreachable"
+        elif not e.get("at"):
+            line = "Edge: daemon never seen"
+        else:
+            line = f"Edge: {e.get('status')} · laptop cpu {e.get('cpu') or 0:.0f}% · ram {e.get('ram') or 0:.0f}%"
+        state = line.split(" · ")[0]
+        if state != self._edge_said.split(" · ")[0] or time.time() - self._edge_said_at > 30:
+            self._edge_said, self._edge_said_at = line, time.time()
+            self._log(line)
+
+    async def _shutdown(self, net: asyncio.Task) -> None:
         if self.voice:
             self.toggle_voice()
         await asyncio.wait_for(net, 5)
